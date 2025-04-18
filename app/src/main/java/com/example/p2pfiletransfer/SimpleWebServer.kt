@@ -244,23 +244,6 @@ class SimpleWebServer(port: Int, val uploadDir: File, private val onClipboardUpd
         }
     }
 
-    fun downloadFile(fileName: String): Response {
-        if (!isValidFileName(fileName)) {
-            return newFixedLengthResponse(Response.Status.FORBIDDEN, "text/plain", "Invalid file path")
-        }
-
-        val file = File(uploadDir, fileName)
-        return if (file.exists()) {
-            // Determine the MIME type and serve the file for download
-            val mimeType = getMimeType(fileName)
-            Log.d(TAG, "Serving file: $fileName")
-            newChunkedResponse(Response.Status.OK, mimeType, file.inputStream())
-        } else {
-            Log.d(TAG, "File not found: $fileName")
-            newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "File not found")
-        }
-    }
-
     fun getAvailableFiles(): List<String> {
         val files = uploadDir.listFiles()?.map { it.name } ?: emptyList()
         Log.d(TAG, "Available files: $files")
@@ -278,7 +261,7 @@ class SimpleWebServer(port: Int, val uploadDir: File, private val onClipboardUpd
             session.parseBody(files)
 
             val fileNames = session.parameters["file"]
-            if (fileNames == null || fileNames.isEmpty()) {
+            if (fileNames.isNullOrEmpty()) {
                 return newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "File parameter is missing")
             }
             val fileName = fileNames.first()
@@ -291,7 +274,6 @@ class SimpleWebServer(port: Int, val uploadDir: File, private val onClipboardUpd
             val destFile = File(uploadDir, fileName)
 
             uploadedFile.copyTo(destFile, overwrite = true)
-            val fileSize = destFile.length()
             uploadedFile.delete()
 
             Log.d(TAG, "File uploaded: $fileName")
@@ -412,10 +394,4 @@ class SimpleWebServer(port: Int, val uploadDir: File, private val onClipboardUpd
         }
     }
 
-    /**
-     * Updates the clipboard text from the server-side and synchronizes it with the local clipboard.
-     */
-    fun updateClipboard(text: String) {
-        clipboardText = text
-    }
 }

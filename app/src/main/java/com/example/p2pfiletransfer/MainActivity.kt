@@ -6,6 +6,7 @@ import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -15,6 +16,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.OpenableColumns
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -39,6 +41,10 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import kotlinx.coroutines.delay
 import androidx.compose.foundation.text.selection.SelectionContainer
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.net.Inet4Address
+import java.net.NetworkInterface
 
 
 class MainActivity : ComponentActivity() {
@@ -92,7 +98,7 @@ class MainActivity : ComponentActivity() {
             if (uri != null) {
                 lifecycleScope.launch {
                     try {
-                        val file = FileProviderUtils.getFileFromUriAsync(this@MainActivity, uri)
+                        val file = getFileFromUriAsync(this@MainActivity, uri)
                         if (file != null && file.exists()) {
                             uploadFile(file)
                             updateSelectedFileName(file.name)
@@ -175,7 +181,7 @@ class MainActivity : ComponentActivity() {
 
             // Download file function
                 fun downloadFile(fileName: String) {
-                val ipAddress = IPAddressUtils.getLocalIpAddress() ?: return
+                val ipAddress = getLocalIpAddress() ?: return
                 val url = "http://$ipAddress:8080/files/$fileName"
 
                 // Create an intent to open the URL in a browser
@@ -284,7 +290,7 @@ class MainActivity : ComponentActivity() {
                 }
                 try {
                     server.start()
-                    val ipAddress = IPAddressUtils.getLocalIpAddress()
+                    val ipAddress = getLocalIpAddress()
                     val url = ipAddress?.let { "http://$it:8080/" } ?: "http://localhost:8080/"
                     //val url = "http://simple-transfer.local:8080/"
                     withContext(Dispatchers.Main) {
@@ -332,7 +338,7 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 try {
-                    FileOperationUtils.moveFile(file, server.uploadDir)
+                    moveFile(file, server.uploadDir)
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "File uploaded: ${file.name}", Toast.LENGTH_SHORT).show()
                     }
@@ -353,6 +359,164 @@ class MainActivity : ComponentActivity() {
         val clipData = ClipData.newPlainText("P2P File Transfer", text)
         clipboardManager.setPrimaryClip(clipData)
         Toast.makeText(this, "Copied to clipboard: $text", Toast.LENGTH_SHORT).show()
+    }
+
+    fun getLocalIpAddress(): String? {
+        return try {
+            NetworkInterface.getNetworkInterfaces().asSequence()
+                .flatMap { it.inetAddresses.asSequence() }
+                .filter { !it.isLoopbackAddress && it is Inet4Address }
+                .map { it.hostAddress }
+                .firstOrNull()
+        } catch (ex: Exception) {
+            Log.e("IPADDRESS", "Error getting local IP address", ex)
+            null
+        }
+    }
+
+    /**
+     * Converts the content URI to a file in the internal storage directory asynchronously.
+     */
+    suspend fun getFileFromUriAsync(context: Context, uri: Uri): File? {
+        return withContext(Dispatchers.IO) {
+            when (uri.scheme) {
+                ContentResolver.SCHEME_CONTENT -> handleContentUri(context, uri)
+                ContentResolver.SCHEME_FILE -> handleFileUri(uri)
+                else -> {
+                    Log.e("FileProviderUtils", "Unsupported URI scheme: ${uri.scheme}")
+                    null
+                }
+            }
+        }
+    }
+
+    /**
+     * Handles content URIs by retrieving the file name and copying the content to internal storage.
+     */
+    private fun handleContentUri(context: Context, uri: Uri): File? {
+        val contentResolver: ContentResolver = context.contentResolver
+
+        // Query the filename from the URI
+        val fileName = queryFileName(contentResolver, uri)
+        if (fileName == null) {
+            Log.e("FileProviderUtils", "Failed to retrieve file name from URI: $uri")
+            return null
+        }
+
+        val sanitizedFileName = sanitizeFileName(fileName)
+        val uniqueFile = getUniqueFile(context, sanitizedFileName)
+
+        // Write the content of the file
+        try {
+            val inputStream = contentResolver.openInputStream(uri)
+            if (inputStream == null) {
+                Log.e("FileProviderUtils", "InputStream is null for URI: $uri")
+                return null
+            }
+            copyStreamToFile(inputStream, uniqueFile)
+        } catch (e: Exception) {
+            Log.e("FileProviderUtils", "Error copying file from URI: $uri", e)
+            return null
+        }
+
+        return uniqueFile
+    }
+
+    /**
+     * Handles file URIs by creating a File object directly.
+     */
+    private fun handleFileUri(uri: Uri): File? {
+        return try {
+            File(uri.path ?: throw IllegalArgumentException("URI path is null: $uri"))
+        } catch (e: Exception) {
+            Log.e("FileProviderUtils", "Error handling file URI: $uri", e)
+            null
+        }
+    }
+
+    /**
+     * Retrieves the display name of the file from the URI.
+     */
+    private fun queryFileName(contentResolver: ContentResolver, uri: Uri): String? {
+        var name: String? = null
+        val cursor = contentResolver.query(uri, null, null, null, null)
+
+        if (cursor != null) {
+            cursor.use {
+                if (it.moveToFirst()) {
+                    val nameIndex = it.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (nameIndex != -1) {
+                        name = it.getString(nameIndex)
+                    } else {
+
+                    }
+                } else {
+                    Log.e("FileProviderUtils", "Cursor did not move to first item for URI: $uri")
+                }
+            }
+        } else {
+            Log.e("FileProviderUtils", "Cursor is null for URI: $uri")
+        }
+
+        return name
+    }
+
+    /**
+     * Sanitizes the file name by replacing illegal characters.
+     */
+    private fun sanitizeFileName(fileName: String): String {
+        return fileName.replace("[^a-zA-Z0-9._-]".toRegex(), "_")
+    }
+
+    /**
+     * Generates a unique file to prevent name collisions.
+     */
+    private fun getUniqueFile(context: Context, fileName: String): File {
+        var uniqueFile = File(context.filesDir, fileName)
+        var count = 1
+        val nameWithoutExtension = fileName.substringBeforeLast(".")
+        val extension = fileName.substringAfterLast(".", "")
+
+        while (uniqueFile.exists()) {
+            uniqueFile = File(context.filesDir, "${nameWithoutExtension}_$count.$extension")
+            count++
+        }
+        return uniqueFile
+    }
+
+    /**
+     * Copies the content of an InputStream to a file.
+     */
+    private fun copyStreamToFile(inputStream: InputStream, file: File) {
+        FileOutputStream(file).use { outputStream ->
+            val buffer = ByteArray(32768) // Increased buffer size for better performance
+            var length: Int
+            while (inputStream.read(buffer).also { length = it } > 0) {
+                outputStream.write(buffer, 0, length)
+            }
+        }
+    }
+
+    fun moveFile(sourceFile: File, destinationDir: File): Boolean {
+        return try {
+            if (!destinationDir.exists()) {
+                destinationDir.mkdirs()
+                Log.d("FileOperationUtils", "Created directory: ${destinationDir.absolutePath}")
+            }
+            val destinationFile = File(destinationDir, sourceFile.name)
+            sourceFile.copyTo(destinationFile, overwrite = true)
+            val deleted = sourceFile.delete()
+            if (deleted) {
+                Log.d("FileOperationUtils", "File moved from ${sourceFile.absolutePath} to ${destinationFile.absolutePath}")
+                true
+            } else {
+                Log.e("FileOperationUtils", "Failed to delete source file after copy: ${sourceFile.absolutePath}")
+                false
+            }
+        } catch (e: Exception) {
+            Log.e("FileOperationUtils", "Error moving file from ${sourceFile.absolutePath} to ${destinationDir.absolutePath}", e)
+            false
+        }
     }
 
     override fun onDestroy() {
